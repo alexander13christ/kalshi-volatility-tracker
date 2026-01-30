@@ -187,81 +187,86 @@ function broadcastAlert(alert) {
   });
 }
 
-// Bootstrap historical data using REAL candlestick data from Kalshi
+// Bootstrap historical data using candlesticks OR previous_price fallback
 async function bootstrapHistoricalData(markets) {
-  console.log(`Bootstrapping ${markets.length} markets with real 12-hour candlestick data...`);
+  console.log(`Bootstrapping ${markets.length} markets...`);
 
   let alertsTriggered = 0;
   let marketsWithHistory = 0;
 
-  // Process markets in batches to avoid rate limiting
   for (let i = 0; i < markets.length; i++) {
     const market = markets[i];
     const ticker = market.ticker;
     const title = market.title || market.subtitle || ticker;
     const currentPrice = (market.last_price || market.yes_ask || 0) / 100;
+    const previousPrice = (market.previous_price || market.previous_yes_bid || 0) / 100;
 
     if (currentPrice === 0) continue;
 
-    // Fetch real 12-hour candlestick data
+    let oldestPrice = 0;
+    let history = [];
+
+    // Try candlesticks first
     const candlesticks = await fetchCandlesticks(ticker, 12);
 
     if (candlesticks.length > 0) {
-      // Get the oldest price from 12 hours ago
       const oldestCandle = candlesticks[0];
-      const oldestPrice = (oldestCandle.open || oldestCandle.close) / 100;
+      oldestPrice = (oldestCandle.open || oldestCandle.close) / 100;
+      history = candlesticks.map(c => ({
+        price: c.close / 100,
+        timestamp: c.end_period_ts * 1000
+      }));
+      history.push({ price: currentPrice, timestamp: Date.now() });
+    } else if (previousPrice > 0 && previousPrice !== currentPrice) {
+      // Fallback to previous_price from market data
+      oldestPrice = previousPrice;
+      history = [
+        { price: previousPrice, timestamp: Date.now() - WINDOW_MS },
+        { price: currentPrice, timestamp: Date.now() }
+      ];
+    }
 
-      if (oldestPrice > 0) {
-        marketsWithHistory++;
+    if (oldestPrice > 0 && history.length > 0) {
+      marketsWithHistory++;
+      priceHistory.set(ticker, history);
 
-        // Build price history from candlesticks
-        const history = candlesticks.map(c => ({
-          price: c.close / 100,
-          timestamp: c.end_period_ts * 1000
-        }));
-        // Add current price
-        history.push({ price: currentPrice, timestamp: Date.now() });
-        priceHistory.set(ticker, history);
+      // Check volatility
+      const priceChange = (currentPrice - oldestPrice) / oldestPrice;
+      const absChange = Math.abs(priceChange);
 
-        // Check volatility
-        const priceChange = (currentPrice - oldestPrice) / oldestPrice;
-        const absChange = Math.abs(priceChange);
+      let tier = null;
+      if (absChange >= 0.20) tier = 20;
+      else if (absChange >= 0.10) tier = 10;
+      else if (absChange >= 0.05) tier = 5;
 
-        let tier = null;
-        if (absChange >= 0.20) tier = 20;
-        else if (absChange >= 0.10) tier = 10;
-        else if (absChange >= 0.05) tier = 5;
+      if (tier) {
+        const alert = {
+          ticker,
+          title,
+          currentPrice,
+          oldPrice: oldestPrice,
+          priceChange: priceChange * 100,
+          direction: priceChange > 0 ? 'up' : 'down',
+          minPrice: Math.min(oldestPrice, currentPrice),
+          maxPrice: Math.max(oldestPrice, currentPrice),
+          timestamp: new Date().toISOString(),
+          tier,
+        };
 
-        if (tier) {
-          const alert = {
-            ticker,
-            title,
-            currentPrice,
-            oldPrice: oldestPrice,
-            priceChange: priceChange * 100,
-            direction: priceChange > 0 ? 'up' : 'down',
-            minPrice: Math.min(...candlesticks.map(c => c.low / 100), currentPrice),
-            maxPrice: Math.max(...candlesticks.map(c => c.high / 100), currentPrice),
-            timestamp: new Date().toISOString(),
-            tier,
-          };
-
-          const tierKey = `tier${tier}`;
-          if (!triggeredAlerts[tierKey].has(ticker)) {
-            triggeredAlerts[tierKey].set(ticker, alert);
-            broadcastAlert(alert);
-            alertsTriggered++;
-            console.log(`ALERT [${tier}%]: ${ticker} - ${alert.priceChange.toFixed(1)}% ${alert.direction} (${title.substring(0, 50)})`);
-          }
+        const tierKey = `tier${tier}`;
+        if (!triggeredAlerts[tierKey].has(ticker)) {
+          triggeredAlerts[tierKey].set(ticker, alert);
+          broadcastAlert(alert);
+          alertsTriggered++;
+          console.log(`ALERT [${tier}%]: ${ticker} - ${alert.priceChange.toFixed(1)}% ${alert.direction} (${title.substring(0, 50)})`);
         }
       }
     } else {
-      // No candlestick data, just start tracking with current price
       priceHistory.set(ticker, [{ price: currentPrice, timestamp: Date.now() }]);
     }
 
-    // Progress update every 50 markets
-    if ((i + 1) % 50 === 0) {
+    // Progress update every 100 markets
+    if ((i + 1) % 100 === 0) {
       console.log(`Processed ${i + 1}/${markets.length} markets...`);
     }
   }
