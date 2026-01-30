@@ -6,7 +6,7 @@ const http = require('http');
 
 const app = express();
 app.use(cors({
-  origin: ['http://localhost:3000', 'https://frontend-six-gold-99.vercel.app'],
+  origin: ['http://localhost:3000', 'https://kalshi-volatility-tracker.vercel.app'],
   credentials: true
 }));
 app.use(express.json());
@@ -28,7 +28,7 @@ const wsClients = new Set();
 
 // Rate limiting: be conservative to avoid 429s
 let lastRequestTime = 0;
-const MIN_REQUEST_INTERVAL = 100; // 100ms between requests (10/sec max)
+const MIN_REQUEST_INTERVAL = 150; // 150ms between requests
 
 async function rateLimitedFetch(url, options = {}) {
   const now = Date.now();
@@ -50,8 +50,8 @@ async function rateLimitedFetch(url, options = {}) {
 
   // If rate limited, wait and retry once
   if (response.status === 429) {
-    console.log('Rate limited, waiting 2 seconds...');
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    console.log('Rate limited, waiting 3 seconds...');
+    await new Promise(resolve => setTimeout(resolve, 3000));
     lastRequestTime = Date.now();
     return fetch(url, {
       ...options,
@@ -71,15 +71,11 @@ async function fetchActiveMarkets() {
   let cursor = null;
   let pages = 0;
 
-  // Use min_close_ts to filter out very short-term markets and get established ones
-  const minCloseTs = Math.floor(Date.now() / 1000) + (24 * 60 * 60); // At least 1 day out
-
   try {
     do {
       const url = new URL(`${KALSHI_API_BASE}/markets`);
       url.searchParams.set('status', 'open');
       url.searchParams.set('limit', '200');
-      url.searchParams.set('min_close_ts', minCloseTs.toString());
       if (cursor) {
         url.searchParams.set('cursor', cursor);
       }
@@ -94,7 +90,7 @@ async function fetchActiveMarkets() {
 
       // Only keep markets with actual trading activity
       const activeMarkets = (data.markets || []).filter(m =>
-        m.volume > 0
+        m.volume > 0 && m.last_price > 0
       );
 
       markets.push(...activeMarkets);
@@ -102,7 +98,7 @@ async function fetchActiveMarkets() {
       pages++;
 
       // Limit pages to avoid too many requests
-      if (pages >= 5 || markets.length >= 500) break;
+      if (pages >= 10 || markets.length >= 1000) break;
 
     } while (cursor);
 
@@ -191,66 +187,86 @@ function broadcastAlert(alert) {
   });
 }
 
-// Bootstrap historical data using previous_price from market data
+// Bootstrap historical data using REAL candlestick data from Kalshi
 async function bootstrapHistoricalData(markets) {
-  console.log(`Bootstrapping ${markets.length} markets using previous_price...`);
+  console.log(`Bootstrapping ${markets.length} markets with real 12-hour candlestick data...`);
 
   let alertsTriggered = 0;
+  let marketsWithHistory = 0;
 
-  for (const market of markets) {
+  // Process markets in batches to avoid rate limiting
+  for (let i = 0; i < markets.length; i++) {
+    const market = markets[i];
     const ticker = market.ticker;
     const title = market.title || market.subtitle || ticker;
     const currentPrice = (market.last_price || market.yes_ask || 0) / 100;
-    const previousPrice = (market.previous_price || market.previous_yes_ask || 0) / 100;
 
     if (currentPrice === 0) continue;
 
-    // If we have a previous price, use it as historical data
-    if (previousPrice > 0 && previousPrice !== currentPrice) {
-      const history = [
-        { price: previousPrice, timestamp: Date.now() - WINDOW_MS }, // Treat as 12h ago
-        { price: currentPrice, timestamp: Date.now() }
-      ];
-      priceHistory.set(ticker, history);
+    // Fetch real 12-hour candlestick data
+    const candlesticks = await fetchCandlesticks(ticker, 12);
 
-      // Check volatility
-      const priceChange = (currentPrice - previousPrice) / previousPrice;
-      const absChange = Math.abs(priceChange);
+    if (candlesticks.length > 0) {
+      // Get the oldest price from 12 hours ago
+      const oldestCandle = candlesticks[0];
+      const oldestPrice = (oldestCandle.open || oldestCandle.close) / 100;
 
-      let tier = null;
-      if (absChange >= 0.20) tier = 20;
-      else if (absChange >= 0.10) tier = 10;
-      else if (absChange >= 0.05) tier = 5;
+      if (oldestPrice > 0) {
+        marketsWithHistory++;
 
-      if (tier) {
-        const alert = {
-          ticker,
-          title,
-          currentPrice,
-          oldPrice: previousPrice,
-          priceChange: priceChange * 100,
-          direction: priceChange > 0 ? 'up' : 'down',
-          minPrice: Math.min(previousPrice, currentPrice),
-          maxPrice: Math.max(previousPrice, currentPrice),
-          timestamp: new Date().toISOString(),
-          tier,
-        };
+        // Build price history from candlesticks
+        const history = candlesticks.map(c => ({
+          price: c.close / 100,
+          timestamp: c.end_period_ts * 1000
+        }));
+        // Add current price
+        history.push({ price: currentPrice, timestamp: Date.now() });
+        priceHistory.set(ticker, history);
 
-        const tierKey = `tier${tier}`;
-        if (!triggeredAlerts[tierKey].has(ticker)) {
-          triggeredAlerts[tierKey].set(ticker, alert);
-          broadcastAlert(alert);
-          alertsTriggered++;
-          console.log(`ALERT [${tier}%]: ${ticker} - ${alert.priceChange.toFixed(1)}% ${alert.direction} (${title.substring(0, 40)})`);
+        // Check volatility
+        const priceChange = (currentPrice - oldestPrice) / oldestPrice;
+        const absChange = Math.abs(priceChange);
+
+        let tier = null;
+        if (absChange >= 0.20) tier = 20;
+        else if (absChange >= 0.10) tier = 10;
+        else if (absChange >= 0.05) tier = 5;
+
+        if (tier) {
+          const alert = {
+            ticker,
+            title,
+            currentPrice,
+            oldPrice: oldestPrice,
+            priceChange: priceChange * 100,
+            direction: priceChange > 0 ? 'up' : 'down',
+            minPrice: Math.min(...candlesticks.map(c => c.low / 100), currentPrice),
+            maxPrice: Math.max(...candlesticks.map(c => c.high / 100), currentPrice),
+            timestamp: new Date().toISOString(),
+            tier,
+          };
+
+          const tierKey = `tier${tier}`;
+          if (!triggeredAlerts[tierKey].has(ticker)) {
+            triggeredAlerts[tierKey].set(ticker, alert);
+            broadcastAlert(alert);
+            alertsTriggered++;
+            console.log(`ALERT [${tier}%]: ${ticker} - ${alert.priceChange.toFixed(1)}% ${alert.direction} (${title.substring(0, 50)})`);
+          }
         }
       }
     } else {
-      // Just start tracking with current price
+      // No candlestick data, just start tracking with current price
       priceHistory.set(ticker, [{ price: currentPrice, timestamp: Date.now() }]);
+    }
+
+    // Progress update every 50 markets
+    if ((i + 1) % 50 === 0) {
+      console.log(`Processed ${i + 1}/${markets.length} markets...`);
     }
   }
 
-  console.log(`Bootstrapped ${priceHistory.size} markets, triggered ${alertsTriggered} alerts`);
+  console.log(`Bootstrapped ${marketsWithHistory} markets with history, triggered ${alertsTriggered} alerts`);
 }
 
 // Main polling loop
@@ -320,11 +336,11 @@ app.get('/api/health', (req, res) => {
 
 app.get('/api/alerts', (req, res) => {
   const tier20 = Array.from(triggeredAlerts.tier20.values())
-    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    .sort((a, b) => Math.abs(b.priceChange) - Math.abs(a.priceChange));
   const tier10 = Array.from(triggeredAlerts.tier10.values())
-    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    .sort((a, b) => Math.abs(b.priceChange) - Math.abs(a.priceChange));
   const tier5 = Array.from(triggeredAlerts.tier5.values())
-    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    .sort((a, b) => Math.abs(b.priceChange) - Math.abs(a.priceChange));
   res.json({ tier20, tier10, tier5 });
 });
 
@@ -401,11 +417,11 @@ server.listen(PORT, '0.0.0.0', async () => {
   console.log(`Backend server running on port ${PORT}`);
   console.log(`WebSocket available at ws://localhost:${PORT}/ws`);
 
-  // Initial fetch and bootstrap
+  // Initial fetch
   const markets = await fetchActiveMarkets();
   console.log(`Initial fetch: ${markets.length} active markets`);
 
-  // Bootstrap historical data for top markets
+  // Bootstrap with REAL historical candlestick data
   await bootstrapHistoricalData(markets);
 
   // Start regular polling (every 30 seconds)
