@@ -1,7 +1,4 @@
-import type { Metadata } from "next";
-import "./globals.css";
-
-export const metadata: Metadata = {
+export const metadata = {
   title: "Kalshi Volatility Tracker",
   description: "Real-time prediction market volatility monitoring",
 };
@@ -13,7 +10,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="bg-gray-50 text-gray-900">{children}</body>
+      <body style={{ margin: 0, background: '#f9fafb' }}>{children}</body>
     </html>
   );
 }
