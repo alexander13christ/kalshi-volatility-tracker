@@ -1,17 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  BarChart,
-  Bar,
-} from "recharts";
+import dynamic from "next/dynamic";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001";
 
@@ -77,51 +67,84 @@ export default function Dashboard() {
   const [marketDetail, setMarketDetail] = useState<MarketDetail | null>(null);
   const [candlesticks, setCandlesticks] = useState<Candlestick[]>([]);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+
+  // Fetch alerts via HTTP as fallback
+  const fetchAlerts = useCallback(async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/alerts`);
+      if (res.ok) {
+        const data = await res.json();
+        setAlerts(data);
+      }
+    } catch (err) {
+      console.error("Failed to fetch alerts:", err);
+    }
+  }, []);
 
   // Connect to WebSocket
   useEffect(() => {
+    // Initial fetch
+    fetchAlerts();
+
     const connect = () => {
-      const ws = new WebSocket(`${BACKEND_URL.replace("http", "ws")}/ws`);
+      try {
+        const wsUrl = BACKEND_URL.replace("http", "ws").replace("https", "wss");
+        const ws = new WebSocket(`${wsUrl}/ws`);
 
-      ws.onopen = () => {
-        console.log("WebSocket connected");
-        setConnected(true);
-      };
+        ws.onopen = () => {
+          console.log("WebSocket connected");
+          setConnected(true);
+          setError(null);
+        };
 
-      ws.onmessage = (event) => {
-        const message = JSON.parse(event.data);
-        if (message.type === "initial") {
-          setAlerts(message.data);
-        } else if (message.type === "alert") {
-          const alert = message.data;
-          const tierKey = `tier${alert.tier}` as keyof AlertsByTier;
-          setAlerts((prev) => ({
-            ...prev,
-            [tierKey]: [alert, ...prev[tierKey]],
-          }));
-        }
-      };
+        ws.onmessage = (event) => {
+          try {
+            const message = JSON.parse(event.data);
+            if (message.type === "initial") {
+              setAlerts(message.data);
+            } else if (message.type === "alert") {
+              const alert = message.data;
+              const tierKey = `tier${alert.tier}` as keyof AlertsByTier;
+              setAlerts((prev) => ({
+                ...prev,
+                [tierKey]: [alert, ...prev[tierKey]],
+              }));
+            }
+          } catch (err) {
+            console.error("Failed to parse message:", err);
+          }
+        };
 
-      ws.onclose = () => {
-        console.log("WebSocket disconnected, reconnecting...");
-        setConnected(false);
-        setTimeout(connect, 3000);
-      };
+        ws.onclose = () => {
+          console.log("WebSocket disconnected, reconnecting...");
+          setConnected(false);
+          setTimeout(connect, 3000);
+        };
 
-      ws.onerror = (error) => {
-        console.error("WebSocket error:", error);
-      };
+        ws.onerror = (err) => {
+          console.error("WebSocket error:", err);
+          setError("WebSocket connection failed");
+        };
 
-      wsRef.current = ws;
+        wsRef.current = ws;
+      } catch (err) {
+        console.error("Failed to create WebSocket:", err);
+        setError("Failed to connect");
+      }
     };
 
     connect();
 
+    // Poll for updates every 30 seconds as backup
+    const pollInterval = setInterval(fetchAlerts, 30000);
+
     return () => {
       wsRef.current?.close();
+      clearInterval(pollInterval);
     };
-  }, []);
+  }, [fetchAlerts]);
 
   // Fetch market details when alert is clicked
   const fetchMarketDetail = useCallback(async (ticker: string) => {
@@ -141,8 +164,8 @@ export default function Dashboard() {
         const data = await historyRes.json();
         setCandlesticks(data.candlesticks || []);
       }
-    } catch (error) {
-      console.error("Error fetching market detail:", error);
+    } catch (err) {
+      console.error("Error fetching market detail:", err);
     } finally {
       setLoadingDetail(false);
     }
@@ -158,31 +181,6 @@ export default function Dashboard() {
     setMarketDetail(null);
     setCandlesticks([]);
   };
-
-  // Format candlestick data for chart
-  const chartData = candlesticks.map((c) => ({
-    time: new Date(c.end_period_ts * 1000).toLocaleDateString(),
-    price: c.close / 100,
-    volume: c.volume,
-    high: c.high / 100,
-    low: c.low / 100,
-  }));
-
-  // Format order book data for chart
-  const orderbookData = marketDetail
-    ? [
-        ...marketDetail.orderbook.yes.map((level) => ({
-          price: level.price / 100,
-          yes: level.quantity,
-          no: 0,
-        })),
-        ...marketDetail.orderbook.no.map((level) => ({
-          price: level.price / 100,
-          yes: 0,
-          no: level.quantity,
-        })),
-      ].sort((a, b) => a.price - b.price)
-    : [];
 
   const totalAlerts = alerts.tier20.length + alerts.tier10.length + alerts.tier5.length;
 
@@ -268,15 +266,15 @@ export default function Dashboard() {
               className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm ${
                 connected
                   ? "bg-green-100 text-green-700"
-                  : "bg-red-100 text-red-700"
+                  : "bg-yellow-100 text-yellow-700"
               }`}
             >
               <span
                 className={`w-2 h-2 rounded-full ${
-                  connected ? "bg-green-500" : "bg-red-500"
+                  connected ? "bg-green-500" : "bg-yellow-500"
                 }`}
               />
-              {connected ? "Live" : "Disconnected"}
+              {connected ? "Live" : "Polling"}
             </span>
             <span className="text-gray-500 text-sm">
               {totalAlerts} total alert{totalAlerts !== 1 ? "s" : ""}
@@ -396,82 +394,9 @@ export default function Dashboard() {
                     </div>
                   )}
 
-                  {/* Order Book Depth */}
-                  {orderbookData.length > 0 && (
-                    <div>
-                      <h4 className="text-lg font-semibold text-gray-900 mb-3">
-                        Order Book Depth
-                      </h4>
-                      <div className="bg-gray-50 rounded-lg p-4">
-                        <ResponsiveContainer width="100%" height={200}>
-                          <BarChart data={orderbookData}>
-                            <CartesianGrid strokeDasharray="3 3" />
-                            <XAxis
-                              dataKey="price"
-                              tickFormatter={(v) => `${(v * 100).toFixed(0)}c`}
-                            />
-                            <YAxis />
-                            <Tooltip />
-                            <Bar dataKey="yes" fill="#22c55e" name="yes" />
-                            <Bar dataKey="no" fill="#ef4444" name="no" />
-                          </BarChart>
-                        </ResponsiveContainer>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Historical Price Chart */}
-                  {chartData.length > 0 && (
-                    <div>
-                      <h4 className="text-lg font-semibold text-gray-900 mb-3">
-                        7-Day Price History
-                      </h4>
-                      <div className="bg-gray-50 rounded-lg p-4">
-                        <ResponsiveContainer width="100%" height={250}>
-                          <LineChart data={chartData}>
-                            <CartesianGrid strokeDasharray="3 3" />
-                            <XAxis dataKey="time" />
-                            <YAxis
-                              domain={[0, 1]}
-                              tickFormatter={(v) => `${(v * 100).toFixed(0)}c`}
-                            />
-                            <Tooltip />
-                            <Line
-                              type="monotone"
-                              dataKey="price"
-                              stroke="#3b82f6"
-                              strokeWidth={2}
-                              dot={false}
-                            />
-                          </LineChart>
-                        </ResponsiveContainer>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Volume History */}
-                  {chartData.length > 0 && (
-                    <div>
-                      <h4 className="text-lg font-semibold text-gray-900 mb-3">
-                        7-Day Volume History
-                      </h4>
-                      <div className="bg-gray-50 rounded-lg p-4">
-                        <ResponsiveContainer width="100%" height={150}>
-                          <BarChart data={chartData}>
-                            <CartesianGrid strokeDasharray="3 3" />
-                            <XAxis dataKey="time" />
-                            <YAxis />
-                            <Tooltip />
-                            <Bar dataKey="volume" fill="#8b5cf6" />
-                          </BarChart>
-                        </ResponsiveContainer>
-                      </div>
-                    </div>
-                  )}
-
-                  {chartData.length === 0 && !loadingDetail && (
+                  {!marketDetail && !loadingDetail && (
                     <p className="text-gray-500 text-center py-4">
-                      No historical data available for this market
+                      No detailed data available for this market
                     </p>
                   )}
                 </div>
