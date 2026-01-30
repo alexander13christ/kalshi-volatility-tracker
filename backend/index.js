@@ -65,46 +65,47 @@ async function rateLimitedFetch(url, options = {}) {
   return response;
 }
 
-// Fetch active markets (with volume and last_price)
+// Fetch all events first, then get markets from active events
 async function fetchActiveMarkets() {
   const markets = [];
-  let cursor = null;
-  let pages = 0;
-  let totalFetched = 0;
+  const seenTickers = new Set();
 
   try {
-    do {
-      const url = new URL(`${KALSHI_API_BASE}/markets`);
-      url.searchParams.set('status', 'open');
-      url.searchParams.set('limit', '200');
-      if (cursor) {
-        url.searchParams.set('cursor', cursor);
+    // First, fetch events to find active ones
+    const eventsUrl = `${KALSHI_API_BASE}/events?status=open&limit=200`;
+    const eventsRes = await rateLimitedFetch(eventsUrl);
+
+    if (!eventsRes.ok) {
+      console.error(`Failed to fetch events: ${eventsRes.status}`);
+      return markets;
+    }
+
+    const eventsData = await eventsRes.json();
+    const events = eventsData.events || [];
+    console.log(`Found ${events.length} open events`);
+
+    // Fetch markets from each event
+    for (const event of events) {
+      const marketsUrl = `${KALSHI_API_BASE}/markets?event_ticker=${event.event_ticker}&status=open`;
+      const marketsRes = await rateLimitedFetch(marketsUrl);
+
+      if (marketsRes.ok) {
+        const marketsData = await marketsRes.json();
+        const eventMarkets = (marketsData.markets || []).filter(m =>
+          m.volume > 0 && m.last_price > 0 && !seenTickers.has(m.ticker)
+        );
+
+        for (const m of eventMarkets) {
+          seenTickers.add(m.ticker);
+          markets.push(m);
+        }
       }
 
-      const response = await rateLimitedFetch(url.toString());
-      if (!response.ok) {
-        console.error(`Failed to fetch markets: ${response.status}`);
-        break;
-      }
+      // Stop if we have enough markets
+      if (markets.length >= 1000) break;
+    }
 
-      const data = await response.json();
-      totalFetched += (data.markets || []).length;
-
-      // Only keep markets with actual trading activity and significant volume
-      const activeMarkets = (data.markets || []).filter(m =>
-        m.volume > 100 && m.last_price > 0
-      );
-
-      markets.push(...activeMarkets);
-      cursor = data.cursor;
-      pages++;
-
-      // Keep paginating until we have enough active markets or run out
-      if (pages >= 50 || markets.length >= 2000) break;
-
-    } while (cursor);
-
-    console.log(`Fetched ${totalFetched} total markets across ${pages} pages, ${markets.length} have activity`);
+    console.log(`Fetched ${markets.length} active markets from ${events.length} events`);
     return markets;
   } catch (error) {
     console.error('Error fetching markets:', error.message);
