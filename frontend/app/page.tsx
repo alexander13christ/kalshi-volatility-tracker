@@ -411,12 +411,7 @@ export default function Dashboard() {
                               tickFormatter={(v) => `${(v * 100).toFixed(0)}c`}
                             />
                             <YAxis />
-                            <Tooltip
-                              formatter={(value: number, name: string) => [
-                                value,
-                                name === "yes" ? "Yes Orders" : "No Orders",
-                              ]}
-                            />
+                            <Tooltip />
                             <Bar dataKey="yes" fill="#22c55e" name="yes" />
                             <Bar dataKey="no" fill="#ef4444" name="no" />
                           </BarChart>
@@ -440,12 +435,7 @@ export default function Dashboard() {
                               domain={[0, 1]}
                               tickFormatter={(v) => `${(v * 100).toFixed(0)}c`}
                             />
-                            <Tooltip
-                              formatter={(value: number) => [
-                                `${(value * 100).toFixed(1)}c`,
-                                "Price",
-                              ]}
-                            />
+                            <Tooltip />
                             <Line
                               type="monotone"
                               dataKey="price"
@@ -471,12 +461,7 @@ export default function Dashboard() {
                             <CartesianGrid strokeDasharray="3 3" />
                             <XAxis dataKey="time" />
                             <YAxis />
-                            <Tooltip
-                              formatter={(value: number) => [
-                                value.toLocaleString(),
-                                "Volume",
-                              ]}
-                            />
+                            <Tooltip />
                             <Bar dataKey="volume" fill="#8b5cf6" />
                           </BarChart>
                         </ResponsiveContainer>
