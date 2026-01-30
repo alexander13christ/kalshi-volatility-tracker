@@ -70,6 +70,7 @@ async function fetchActiveMarkets() {
   const markets = [];
   let cursor = null;
   let pages = 0;
+  let totalFetched = 0;
 
   try {
     do {
@@ -87,21 +88,23 @@ async function fetchActiveMarkets() {
       }
 
       const data = await response.json();
+      totalFetched += (data.markets || []).length;
 
-      // Only keep markets with actual trading activity
+      // Only keep markets with actual trading activity and significant volume
       const activeMarkets = (data.markets || []).filter(m =>
-        m.volume > 0 && m.last_price > 0
+        m.volume > 100 && m.last_price > 0
       );
 
       markets.push(...activeMarkets);
       cursor = data.cursor;
       pages++;
 
-      // Limit pages to avoid too many requests
-      if (pages >= 10 || markets.length >= 1000) break;
+      // Keep paginating until we have enough active markets or run out
+      if (pages >= 50 || markets.length >= 2000) break;
 
     } while (cursor);
 
+    console.log(`Fetched ${totalFetched} total markets across ${pages} pages, ${markets.length} have activity`);
     return markets;
   } catch (error) {
     console.error('Error fetching markets:', error.message);
