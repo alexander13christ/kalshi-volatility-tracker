@@ -393,8 +393,8 @@ wss.on('connection', (ws) => {
   });
 });
 
-// Start server
-server.listen(PORT, async () => {
+// Start server - bind to 0.0.0.0 for Railway
+server.listen(PORT, '0.0.0.0', async () => {
   console.log(`Backend server running on port ${PORT}`);
   console.log(`WebSocket available at ws://localhost:${PORT}/ws`);
 
